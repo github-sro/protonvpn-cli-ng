@@ -7,8 +7,9 @@ import json
 import subprocess
 import re
 import fileinput
-import getpass
 import random
+import ipaddress
+import math
 # External Libraries
 import requests
 # ProtonVPN-CLI functions
@@ -23,7 +24,7 @@ from .constants import (
 def call_api(endpoint, json_format=True, handle_errors=True):
     """Call to the ProtonVPN API."""
 
-    api_domain = "https://api.protonmail.ch"
+    api_domain = "https://api.protonvpn.ch"
     url = api_domain + endpoint
 
     headers = {
@@ -152,11 +153,7 @@ def get_country_name(code):
     """Return the full name of a country from code"""
 
     from .country_codes import country_codes
-
-    try:
-        return country_codes["cc_to_name"][code]
-    except KeyError:
-        return code
+    return country_codes.get(code, code)
 
 
 def get_fastest_server(server_pool):
@@ -191,7 +188,7 @@ def get_default_nic():
 
 def is_connected():
     """Check if a VPN connection already exists."""
-    ovpn_processes = subprocess.run(["pgrep", "openvpn"],
+    ovpn_processes = subprocess.run(["pgrep", "--exact", "openvpn"],
                                     stdout=subprocess.PIPE)
     ovpn_processes = ovpn_processes.stdout.decode("utf-8").split()
 
@@ -226,44 +223,8 @@ def wait_for_network(wait_time):
 
 
 def cidr_to_netmask(cidr):
-    netmask = "0"
-    cidr_netmask = {
-        1: "128.0.0.0",
-        2: "192.0.0.0",
-        3: "224.0.0.0",
-        4: "240.0.0.0",
-        5: "248.0.0.0",
-        6: "252.0.0.0",
-        7: "254.0.0.0",
-        8: "255.0.0.0",
-        9: "255.128.0.0",
-        10: "255.192.0.0",
-        11: "255.224.0.0",
-        12: "255.240.0.0",
-        13: "255.248.0.0",
-        14: "255.252.0.0",
-        15: "255.254.0.0",
-        16: "255.255.0.0",
-        17: "255.255.128.0",
-        18: "255.255.192.0",
-        19: "255.255.224.0",
-        20: "255.255.240.0",
-        21: "255.255.248.0",
-        22: "255.255.252.0",
-        23: "255.255.254.0",
-        24: "255.255.255.0",
-        25: "255.255.255.128",
-        26: "255.255.255.192",
-        27: "255.255.255.224",
-        28: "255.255.255.240",
-        29: "255.255.255.248",
-        30: "255.255.255.252",
-        31: "255.255.255.254",
-        32: "255.255.255.255",
-    }
-
-    netmask = cidr_netmask[cidr]
-    return netmask
+    subnet = ipaddress.IPv4Network("0.0.0.0/{0}".format(cidr))
+    return str(subnet.netmask)
 
 
 def make_ovpn_template():
@@ -363,7 +324,7 @@ def change_file_owner(path):
 
 def check_root():
     """Check if the program was executed as root and prompt the user."""
-    if getpass.getuser() != "root":
+    if os.geteuid() != 0:
         print(
             "[!] The program was not executed as root.\n"
             "[!] Please run as root."
@@ -379,7 +340,7 @@ def check_root():
                                    stderr=subprocess.PIPE)
             if not check.returncode == 0:
                 logger.debug("{0} not found".format(program))
-                print("'{0}' not found. \n".format(program),
+                print("'{0}' not found. \n".format(program) +
                       "Please install {0}.".format(program))
                 sys.exit(1)
 
@@ -460,7 +421,7 @@ def check_update():
         )
 
 
-def check_init(check_props=True):
+def check_init():
     """Check if a profile has been initialized, quit otherwise."""
 
     try:
@@ -471,27 +432,33 @@ def check_init(check_props=True):
             )
             logger.debug("Initialized Profile not found")
             sys.exit(1)
-        elif check_props:
-            # Check if required properties are set.
-            # This is to ensure smooth updates so the user can be warned
-            # when a property is missing and can be ordered
-            # to run `protonvpn configure` or something else.
+        else:
+            # Check if required configuration values are set
+            # If this isn't the case it will set a default value
 
-            required_props = ["username", "tier", "default_protocol",
-                              "dns_leak_protection", "custom_dns"]
+            default_conf = {
+                "USER": {
+                    "username": "username",
+                    "tier": "0",
+                    "default_protocol": "udp",
+                    "dns_leak_protection": "1",
+                    "custom_dns": "None",
+                    "check_update_interval": "3",
+                    "killswitch": "0",
+                    "split_tunnel": "0",
+                },
+            }
 
-            for prop in required_props:
-                try:
-                    get_config_value("USER", prop)
-                except KeyError:
-                    print(
-                        "[!] {0} is missing from configuration.\n".format(prop), # noqa
-                        "[!] Please run 'protonvpn configure' to set it."
-                    )
-                    logger.debug(
-                        "{0} is missing from configuration".format(prop)
-                    )
-                    sys.exit(1)
+            for section in default_conf:
+                for config_key in default_conf[section]:
+                    try:
+                        get_config_value(section, config_key)
+                    except KeyError:
+                        logger.debug("Config {0}/{1} not found, default set"
+                                     .format(section, config_key))
+                        set_config_value(section, config_key,
+                                         default_conf[section][config_key])
+
     except KeyError:
         print(
             "[!] There has been no profile initialized yet. "
@@ -515,3 +482,38 @@ def is_valid_ip(ipaddr):
 
     else:
         return False
+
+
+def get_transferred_data():
+    """Reads and returns the amount of data transferred during a session
+    from the /sys/ directory"""
+
+    def convert_size(size_bytes):
+        """Converts byte amounts into human readable formats"""
+        if size_bytes == 0:
+            return "0B"
+        size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+
+        i = int(math.floor(math.log(size_bytes, 1000)))
+        p = math.pow(1000, i)
+        s = round(size_bytes / p, 2)
+        return "{0} {1}".format(s, size_name[i])
+
+    base_path = "/sys/class/net/{0}/statistics/{1}"
+
+    if os.path.isfile(base_path.format('proton0', 'rx_bytes')):
+        adapter_name = 'proton0'
+    elif os.path.isfile(base_path.format('tun0', 'rx_bytes')):
+        adapter_name = 'tun0'
+    else:
+        logger.debug("No usage stats for VPN interface available")
+        return '-', '-'
+
+    # Get transmitted and received bytes from /sys/ directory
+    with open(base_path.format(adapter_name, 'tx_bytes'), "r") as f:
+        tx_bytes = int(f.read())
+
+    with open(base_path.format(adapter_name, 'rx_bytes'), "r") as f:
+        rx_bytes = int(f.read())
+
+    return convert_size(tx_bytes), convert_size(rx_bytes)

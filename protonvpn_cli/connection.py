@@ -18,7 +18,8 @@ from .utils import (
     check_init, pull_server_data, is_connected,
     get_servers, get_server_value, get_config_value,
     set_config_value, get_ip_info, get_country_name,
-    get_fastest_server, check_update, get_default_nic
+    get_fastest_server, check_update, get_default_nic,
+    get_transferred_data
 )
 # Constants
 from .constants import (
@@ -190,7 +191,7 @@ def country_f(country_code, protocol=None):
 
     if len(server_pool) == 0:
         print(
-            "[!] No Server in country {0} found\n".format(country_code),
+            "[!] No Server in country {0} found\n".format(country_code) +
             "[!] Please choose a valid country"
         )
         logger.debug("No server in country {0}".format(country_code))
@@ -215,6 +216,11 @@ def feature_f(feature, protocol=None):
     servers = get_servers()
 
     server_pool = [s for s in servers if s["Features"] == feature]
+
+    if len(server_pool) == 0:
+        logger.debug("No servers found with users selection. Exiting.")
+        print("[!] No servers found with your selection.")
+        sys.exit(1)
 
     fastest_server = get_fastest_server(server_pool)
     openvpn_connect(fastest_server, protocol)
@@ -257,7 +263,7 @@ def direct(user_input, protocol=None):
                      "{0}".format('-' + tor if tor is not None else '')
     else:
         print(
-            "[!] '{0}' is not a valid servername\n".format(user_input),
+            "[!] '{0}' is not a valid servername\n".format(user_input) +
             "[!] Please enter a valid servername"
         )
         logger.debug("'{0}' is not a valid servername'".format(user_input))
@@ -388,16 +394,7 @@ def status():
 
     servers = get_servers()
 
-    subs = [s["Servers"] for s in servers if s["Name"] == connected_server][0]
-    server_ips = [subserver["ExitIP"] for subserver in subs]
-
     ip, isp = get_ip_info()
-
-    if ip not in server_ips:
-        logger.debug("IP not found in connected_server IPs")
-        print("[!] Your IP was not found in last Servers IPs\n"
-              "[!] Maybe you're not connected to a ProtonVPN Server")
-        sys.exit(1)
 
     # Collect Information
     all_features = {0: "Normal", 1: "Secure-Core", 2: "Tor", 4: "P2P"}
@@ -420,6 +417,8 @@ def status():
     connection_time = str(datetime.timedelta(
         seconds=connection_time)).split(".")[0]
 
+    tx_amount, rx_amount = get_transferred_data()
+
     # Print Status Output
     logger.debug("Printing status")
     print(
@@ -432,7 +431,9 @@ def status():
         "Kill Switch:  {0}\n".format(killswitch_status) +
         "Country:      {0}\n".format(country) +
         "City:         {0}\n".format(city) +
-        "Load:         {0}%".format(load)
+        "Load:         {0}%\n".format(load) +
+        "Received:     {0}\n".format(rx_amount) +
+        "Sent:         {0}".format(tx_amount)
     )
 
 
@@ -471,7 +472,9 @@ def openvpn_connect(servername, protocol):
             [
                 "openvpn",
                 "--config", OVPN_FILE,
-                "--auth-user-pass", PASSFILE
+                "--auth-user-pass", PASSFILE,
+                "--dev", "proton0",
+                "--dev-type", "tun"
             ],
             stdout=f, stderr=f
         )
@@ -764,7 +767,7 @@ def manage_killswitch(mode, proto=None, port=None):
     Disable and enable the VPN Kill Switch.
 
     The Kill Switch creates IPTables rules that only allow connections to go
-    through the OpenVPN device. If the OpenVPN process stops for some unkown
+    through the OpenVPN device. If the OpenVPN process stops for some unknown
     reason this will completely block access to the internet.
     """
 
